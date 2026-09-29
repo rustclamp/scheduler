@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.96.1"
 description = "Contribution target for bounded, clock-driven application jobs."
 repository = "https://github.com/rustclamp/scheduler"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
 publish = false
 
