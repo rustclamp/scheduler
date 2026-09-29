@@ -16,3 +16,10 @@ scheduler-specific context.
 Shutdown owners call `stop_admission()` and await the tick futures they own.
 This closes the admission gate before active operations drain; no queued job
 buffer exists inside the scheduler.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you state otherwise, any
+contribution you submit for inclusion is dual licensed as above, without
+additional terms or conditions.
