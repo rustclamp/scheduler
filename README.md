@@ -12,3 +12,7 @@ it does not claim cross-process coordination. Applications that run multiple
 scheduler processes need an explicit distributed lock capability. Job handlers
 are existing application operations wrapped as declarations and receive no
 scheduler-specific context.
+
+Shutdown owners call `stop_admission()` and await the tick futures they own.
+This closes the admission gate before active operations drain; no queued job
+buffer exists inside the scheduler.

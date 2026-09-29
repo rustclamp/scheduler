@@ -116,7 +116,10 @@ impl ContributionTarget for SchedulerTarget {
                 }
             }
         }
-        Ok(Scheduler { jobs })
+        Ok(Scheduler {
+            jobs,
+            accepting: Mutex::new(true),
+        })
     }
 }
 
@@ -131,9 +134,21 @@ struct Job {
 /// Compiled schedule. Invocations are sequential within one tick and never overlap per job.
 pub struct Scheduler {
     jobs: BTreeMap<String, Job>,
+    accepting: Mutex<bool>,
 }
 
 impl Scheduler {
+    /// Stops admitting new job invocations; already admitted handlers are allowed to finish.
+    ///
+    /// The application owns each tick future and must await its completion to drain work.
+    /// Once this method returns, no later invocation can pass the admission gate.
+    pub fn stop_admission(&self) {
+        *self
+            .accepting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+    }
+
     /// Runs jobs due at the injected clock's current time.
     pub async fn tick(&self, clock: &dyn Clock) -> TickReport {
         let now = clock.now();
@@ -147,13 +162,16 @@ impl Scheduler {
                 }
                 Due::Yes => {}
             }
-            if job
-                .running
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                report.overlaps_skipped += 1;
-                continue;
+            match try_start_job(&self.accepting, &job.running) {
+                StartJob::Started => {}
+                StartJob::AlreadyRunning => {
+                    report.overlaps_skipped += 1;
+                    continue;
+                }
+                StartJob::Stopped => {
+                    report.admission_stopped = true;
+                    break;
+                }
             }
             let _running = RunningGuard(&job.running);
             report.invoked += 1;
@@ -172,6 +190,29 @@ impl Scheduler {
     /// Reports whether this target compiled no jobs.
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
+    }
+}
+
+enum StartJob {
+    Started,
+    AlreadyRunning,
+    Stopped,
+}
+
+fn try_start_job(accepting: &Mutex<bool>, running: &AtomicBool) -> StartJob {
+    let accepting = accepting
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !*accepting {
+        return StartJob::Stopped;
+    }
+    if running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        StartJob::Started
+    } else {
+        StartJob::AlreadyRunning
     }
 }
 
@@ -218,6 +259,8 @@ pub struct TickReport {
     pub overlaps_skipped: usize,
     /// Invoked jobs that returned an error.
     pub failed: usize,
+    /// Admission was stopped before all due jobs started.
+    pub admission_stopped: bool,
 }
 
 /// Invalid or conflicting schedule declarations detected before runtime.
