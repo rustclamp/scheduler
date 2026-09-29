@@ -1,0 +1,19 @@
+[package]
+name = "rustclamp-scheduler"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.1"
+description = "Contribution target for bounded, clock-driven application jobs."
+repository = "https://github.com/rustclamp/scheduler"
+readme = "README.md"
+publish = false
+
+[dependencies]
+rustclamp-core = { version = "0.1.0", path = "../core" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
