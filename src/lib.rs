@@ -161,6 +161,31 @@ impl Scheduler {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
     }
 
+    /// Ticks every `resolution` until `stop` completes, then stops admission.
+    ///
+    /// Missed ticks are skipped, and the scheduler's own misfire policy decides
+    /// what a late job does. A tick in progress when `stop` completes finishes first.
+    #[cfg(feature = "tokio")]
+    pub async fn run_until(
+        &self,
+        clock: &dyn Clock,
+        resolution: Duration,
+        stop: impl Future<Output = ()>,
+    ) {
+        let mut stop = std::pin::pin!(stop);
+        let mut ticks = tokio::time::interval(resolution);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = &mut stop => break,
+                _ = ticks.tick() => {
+                    self.tick(clock).await;
+                }
+            }
+        }
+        self.stop_admission();
+    }
+
     /// Runs jobs due at the injected clock's current time.
     pub async fn tick(&self, clock: &dyn Clock) -> TickReport {
         let now = clock.now();

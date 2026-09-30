@@ -79,3 +79,40 @@ fn first_run_after_interval_waits_one_interval() {
         [0, 0, 1, 1]
     );
 }
+
+#[cfg(feature = "tokio")]
+#[test]
+fn run_until_ticks_until_stopped_then_closes_admission() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rustclamp_core::SystemClock;
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counter = runs.clone();
+    let declaration = JobDeclaration::new(
+        "beat",
+        Duration::from_millis(20),
+        MisfirePolicy::Skip,
+        move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    )
+    .first_run_after_interval();
+    let scheduler = SchedulerTarget.build(&[(OWNER, declaration)]).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let stop = tokio::time::sleep(Duration::from_millis(110));
+        scheduler
+            .run_until(&SystemClock, Duration::from_millis(5), stop)
+            .await;
+    });
+    let beats = runs.load(Ordering::SeqCst);
+    assert!((3..=6).contains(&beats), "{beats} beats in 110 ms at 20 ms");
+    let after = runtime.block_on(scheduler.tick(&SystemClock));
+    assert!(after.admission_stopped || after.invoked == 0);
+}
