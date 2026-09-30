@@ -5,6 +5,7 @@
 
 use rustclamp_core::{
     Clock, Contribution, ContributionId, ContributionTarget, ContributionTargetId, ModuleId,
+    Qualifier, QualifierId,
 };
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::error::Error;
@@ -75,6 +76,13 @@ impl JobDeclaration {
 
 impl Contribution for JobDeclaration {
     const ID: ContributionId = ContributionId::new("rustclamp.scheduler.job");
+}
+
+/// Qualifier for the scheduler's job target, so apps need not define one.
+pub struct SchedulerJobs;
+
+impl Qualifier for SchedulerJobs {
+    const ID: QualifierId = QualifierId::new("rustclamp.scheduler.jobs");
 }
 
 /// Target that validates and compiles scheduled job declarations.
@@ -164,13 +172,29 @@ impl Scheduler {
     /// Ticks every `resolution` until `stop` completes, then stops admission.
     ///
     /// Missed ticks are skipped, and the scheduler's own misfire policy decides
-    /// what a late job does. A tick in progress when `stop` completes finishes first.
+    /// what a late job does. A tick in progress when `stop` completes finishes
+    /// first. Reports, and the job errors in them, are dropped; use
+    /// [`Scheduler::run_until_reporting`] to see them.
     #[cfg(feature = "tokio")]
     pub async fn run_until(
         &self,
         clock: &dyn Clock,
         resolution: Duration,
         stop: impl Future<Output = ()>,
+    ) {
+        self.run_until_reporting(clock, resolution, stop, |_| {})
+            .await;
+    }
+
+    /// [`Scheduler::run_until`], handing each tick's report, with its job
+    /// errors, to `on_report`.
+    #[cfg(feature = "tokio")]
+    pub async fn run_until_reporting(
+        &self,
+        clock: &dyn Clock,
+        resolution: Duration,
+        stop: impl Future<Output = ()>,
+        mut on_report: impl FnMut(TickReport),
     ) {
         let mut stop = std::pin::pin!(stop);
         let mut ticks = tokio::time::interval(resolution);
@@ -179,7 +203,7 @@ impl Scheduler {
             tokio::select! {
                 () = &mut stop => break,
                 _ = ticks.tick() => {
-                    self.tick(clock).await;
+                    on_report(self.tick(clock).await);
                 }
             }
         }
@@ -190,7 +214,7 @@ impl Scheduler {
     pub async fn tick(&self, clock: &dyn Clock) -> TickReport {
         let now = clock.now();
         let mut report = TickReport::default();
-        for job in self.jobs.values() {
+        for (name, job) in &self.jobs {
             match is_due(job, now) {
                 Due::No => continue,
                 Due::SkippedMisfire => {
@@ -212,11 +236,28 @@ impl Scheduler {
             }
             let _running = RunningGuard(&job.running);
             report.invoked += 1;
-            if (job.handler)().await.is_err() {
+            if let Err(error) = (job.handler)().await {
                 report.failed += 1;
+                report.failures.push((name.clone(), error));
             }
         }
         report
+    }
+
+    /// Runs job `name` now, whether or not it is due, as an admin action or a
+    /// test would. The overlap rule and [`Scheduler::stop_admission`] still
+    /// apply. The job's schedule is left as it was.
+    pub async fn run_now(&self, name: &str) -> RunNow {
+        let Some(job) = self.jobs.get(name) else {
+            return RunNow::NoSuchJob;
+        };
+        match try_start_job(&self.accepting, &job.running) {
+            StartJob::Started => {}
+            StartJob::AlreadyRunning => return RunNow::AlreadyRunning,
+            StartJob::Stopped => return RunNow::Stopped,
+        }
+        let _running = RunningGuard(&job.running);
+        RunNow::Ran((job.handler)().await)
     }
 
     /// Returns how many job declarations were compiled.
@@ -274,11 +315,16 @@ fn is_due(job: &Job, now: SystemTime) -> Due {
     }
     let late_by = now.duration_since(scheduled).unwrap_or_default();
     let missed_intervals = late_by.as_nanos() / job.interval.as_nanos();
+    // The next slot on the original grid strictly after `now`, not `now +
+    // interval`: ticking late would otherwise push every later run back too.
+    *next_run = u32::try_from(missed_intervals + 1)
+        .ok()
+        .and_then(|slots| job.interval.checked_mul(slots))
+        .and_then(|ahead| scheduled.checked_add(ahead))
+        .or_else(|| now.checked_add(job.interval));
     if missed_intervals > 0 && job.misfire == MisfirePolicy::Skip {
-        *next_run = now.checked_add(job.interval);
         return Due::SkippedMisfire;
     }
-    *next_run = now.checked_add(job.interval);
     Due::Yes
 }
 
@@ -291,7 +337,7 @@ impl Drop for RunningGuard<'_> {
 }
 
 /// Summary of one scheduler tick.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct TickReport {
     /// Jobs invoked during this tick.
     pub invoked: usize,
@@ -301,8 +347,23 @@ pub struct TickReport {
     pub overlaps_skipped: usize,
     /// Invoked jobs that returned an error.
     pub failed: usize,
+    /// The name and error of each job that failed, in job-name order.
+    pub failures: Vec<(String, JobError)>,
     /// Admission was stopped before all due jobs started.
     pub admission_stopped: bool,
+}
+
+/// What [`Scheduler::run_now`] did.
+#[derive(Debug)]
+pub enum RunNow {
+    /// The job ran; its own result.
+    Ran(Result<(), JobError>),
+    /// No job has that name.
+    NoSuchJob,
+    /// The job was already running, so it was not started again.
+    AlreadyRunning,
+    /// Admission is stopped.
+    Stopped,
 }
 
 /// Invalid or conflicting schedule declarations detected before runtime.
