@@ -1,8 +1,8 @@
 //! Tests for when a job's first invocation happens.
 
-use std::cell::Cell;
 use std::future::Future;
 use std::pin::pin;
+use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, SystemTime};
 
@@ -12,17 +12,18 @@ use rustclamp_scheduler::{JobDeclaration, MisfirePolicy, SchedulerTarget};
 const OWNER: ModuleId = ModuleId::new("test.module.heartbeat");
 const INTERVAL: Duration = Duration::from_secs(10);
 
-struct ManualClock(Cell<SystemTime>);
+// A Mutex, not a Cell: core's Clock is Send + Sync (core#5).
+struct ManualClock(Mutex<SystemTime>);
 
 impl Clock for ManualClock {
     fn now(&self) -> SystemTime {
-        self.0.get()
+        *self.0.lock().unwrap()
     }
 }
 
 impl ManualClock {
     fn advance(&self, by: Duration) {
-        self.0.set(self.0.get() + by);
+        *self.0.lock().unwrap() += by;
     }
 }
 
@@ -56,7 +57,7 @@ fn invocations(declaration: JobDeclaration, clock: &ManualClock, ticks: &[Durati
 
 #[test]
 fn a_job_runs_on_the_first_tick_by_default() {
-    let clock = ManualClock(Cell::new(SystemTime::UNIX_EPOCH));
+    let clock = ManualClock(Mutex::new(SystemTime::UNIX_EPOCH));
     let ticks = [
         Duration::ZERO,
         Duration::from_secs(5),
@@ -67,7 +68,7 @@ fn a_job_runs_on_the_first_tick_by_default() {
 
 #[test]
 fn first_run_after_interval_waits_one_interval() {
-    let clock = ManualClock(Cell::new(SystemTime::UNIX_EPOCH));
+    let clock = ManualClock(Mutex::new(SystemTime::UNIX_EPOCH));
     let ticks = [
         Duration::ZERO,
         Duration::from_secs(5),
