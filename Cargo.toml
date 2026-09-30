@@ -9,7 +9,13 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 publish = false
 
+[features]
+default = []
+# Scheduler::run_until, an async tick driver (ADR 0020).
+tokio = ["dep:tokio"]
+
 [dependencies]
+tokio = { version = "1.53.1", optional = true, default-features = false, features = ["rt", "time", "macros"] }
 rustclamp-core = { version = "0.1.0", path = "../core" }
 
 [lints.rust]
@@ -18,3 +24,4 @@ missing_docs = "deny"
 
 [lints.rustdoc]
 broken_intra_doc_links = "deny"
+

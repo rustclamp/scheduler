@@ -39,6 +39,7 @@ pub struct JobDeclaration {
     name: String,
     interval: Duration,
     misfire: MisfirePolicy,
+    first_run_after_interval: bool,
     handler: Handler,
 }
 
@@ -58,8 +59,17 @@ impl JobDeclaration {
             name: name.into(),
             interval,
             misfire,
+            first_run_after_interval: false,
             handler: Arc::new(move || Box::pin(handler())),
         }
+    }
+
+    /// Waits one full interval before the first invocation. By default a job
+    /// runs on the scheduler's first tick.
+    #[must_use]
+    pub fn first_run_after_interval(mut self) -> Self {
+        self.first_run_after_interval = true;
+        self
     }
 }
 
@@ -103,6 +113,7 @@ impl ContributionTarget for SchedulerTarget {
                     entry.insert(Job {
                         interval: declaration.interval,
                         misfire: declaration.misfire,
+                        first_run_after_interval: declaration.first_run_after_interval,
                         handler: Arc::clone(&declaration.handler),
                         next_run: Mutex::new(None),
                         running: AtomicBool::new(false),
@@ -126,6 +137,7 @@ impl ContributionTarget for SchedulerTarget {
 struct Job {
     interval: Duration,
     misfire: MisfirePolicy,
+    first_run_after_interval: bool,
     handler: Handler,
     next_run: Mutex<Option<SystemTime>>,
     running: AtomicBool,
@@ -147,6 +159,31 @@ impl Scheduler {
             .accepting
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+    }
+
+    /// Ticks every `resolution` until `stop` completes, then stops admission.
+    ///
+    /// Missed ticks are skipped, and the scheduler's own misfire policy decides
+    /// what a late job does. A tick in progress when `stop` completes finishes first.
+    #[cfg(feature = "tokio")]
+    pub async fn run_until(
+        &self,
+        clock: &dyn Clock,
+        resolution: Duration,
+        stop: impl Future<Output = ()>,
+    ) {
+        let mut stop = std::pin::pin!(stop);
+        let mut ticks = tokio::time::interval(resolution);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = &mut stop => break,
+                _ = ticks.tick() => {
+                    self.tick(clock).await;
+                }
+            }
+        }
+        self.stop_admission();
     }
 
     /// Runs jobs due at the injected clock's current time.
@@ -226,7 +263,12 @@ fn is_due(job: &Job, now: SystemTime) -> Due {
     let Ok(mut next_run) = job.next_run.lock() else {
         return Due::No;
     };
-    let scheduled = *next_run.get_or_insert(now);
+    let first = if job.first_run_after_interval {
+        now.checked_add(job.interval).unwrap_or(now)
+    } else {
+        now
+    };
+    let scheduled = *next_run.get_or_insert(first);
     if now < scheduled {
         return Due::No;
     }
