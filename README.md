@@ -2,9 +2,10 @@
 
 Clock-driven job declarations and scheduling policy, separate from async task
 execution. The target validates unique job names and positive intervals before
-runtime. Each tick uses Core's replaceable `Clock`, runs due jobs sequentially,
-and limits each job to one active invocation. The target caps declarations at
-128 jobs.
+runtime. Each tick uses Core's replaceable `Clock`, runs due jobs concurrently on
+the ticking task, and limits each job to one active invocation. The target caps declarations at
+128 jobs. With the `tokio` feature, `run_until` sleeps until the next job is
+due, at most a minute and at least one resolution.
 
 Misfires either skip stale intervals or run once and schedule from the current
 time. A process-local lock prevents overlapping invocations in one scheduler;

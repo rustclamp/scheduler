@@ -14,9 +14,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 const MAX_JOBS: usize = 128;
+
+/// Longest the run loop sleeps between ticks.
+#[cfg(feature = "tokio")]
+const MAX_IDLE: Duration = Duration::from_secs(60);
 
 /// A boxed future returned by a scheduled application operation.
 pub type JobFuture = Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'static>>;
@@ -151,7 +156,7 @@ struct Job {
     running: AtomicBool,
 }
 
-/// Compiled schedule. Invocations are sequential within one tick and never overlap per job.
+/// Compiled schedule. Jobs due in one tick run concurrently and never overlap per job.
 pub struct Scheduler {
     jobs: BTreeMap<String, Job>,
     accepting: Mutex<bool>,
@@ -169,8 +174,11 @@ impl Scheduler {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
     }
 
-    /// Ticks every `resolution` until `stop` completes, then stops admission.
+    /// Ticks until `stop` completes, then stops admission.
     ///
+    /// Between ticks it sleeps until the next job is due on `clock`, but never
+    /// less than `resolution` and never more than a minute, so a clock that
+    /// jumps (a test clock, a wall-clock step) is noticed within a minute.
     /// Missed ticks are skipped, and the scheduler's own misfire policy decides
     /// what a late job does. A tick in progress when `stop` completes finishes
     /// first. Reports, and the job errors in them, are dropped; use
@@ -197,23 +205,47 @@ impl Scheduler {
         mut on_report: impl FnMut(TickReport),
     ) {
         let mut stop = std::pin::pin!(stop);
-        let mut ticks = tokio::time::interval(resolution);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut wait = Duration::ZERO;
         loop {
             tokio::select! {
                 () = &mut stop => break,
-                _ = ticks.tick() => {
+                () = tokio::time::sleep(wait) => {
                     on_report(self.tick(clock).await);
+                    wait = self.until_next_due(clock.now()).min(MAX_IDLE).max(resolution);
                 }
             }
         }
         self.stop_admission();
     }
 
-    /// Runs jobs due at the injected clock's current time.
+    /// How long until the earliest job is due; zero if one is due or has not been scheduled yet.
+    #[cfg(feature = "tokio")]
+    fn until_next_due(&self, now: SystemTime) -> Duration {
+        self.jobs
+            .values()
+            .map(|job| {
+                let next = *job
+                    .next_run
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                next.map_or(Duration::ZERO, |at| {
+                    at.duration_since(now).unwrap_or_default()
+                })
+            })
+            .min()
+            .unwrap_or(MAX_IDLE)
+    }
+
+    /// Runs jobs due at the injected clock's current time, concurrently.
+    ///
+    /// The due jobs are polled together on the calling task, so a slow job does
+    /// not delay the others, and no `Send` or `'static` bound is added. The tick
+    /// completes when the slowest job does.
     pub async fn tick(&self, clock: &dyn Clock) -> TickReport {
         let now = clock.now();
         let mut report = TickReport::default();
+        let mut names = Vec::new();
+        let mut running: Vec<(JobFuture, RunningGuard<'_>)> = Vec::new();
         for (name, job) in &self.jobs {
             match is_due(job, now) {
                 Due::No => continue,
@@ -234,11 +266,37 @@ impl Scheduler {
                     break;
                 }
             }
-            let _running = RunningGuard(&job.running);
             report.invoked += 1;
-            if let Err(error) = (job.handler)().await {
+            names.push(name);
+            running.push(((job.handler)(), RunningGuard(&job.running)));
+        }
+        // Each job's guard is released as soon as that job finishes.
+        let mut pending: Vec<_> = running.into_iter().map(Some).collect();
+        let mut outcomes: Vec<Option<Result<(), JobError>>> =
+            pending.iter().map(|_| None).collect();
+        std::future::poll_fn(|cx| {
+            let mut all_done = true;
+            for (slot, outcome) in pending.iter_mut().zip(&mut outcomes) {
+                let Some((future, _)) = slot else { continue };
+                match future.as_mut().poll(cx) {
+                    Poll::Ready(result) => {
+                        *outcome = Some(result);
+                        *slot = None;
+                    }
+                    Poll::Pending => all_done = false,
+                }
+            }
+            if all_done {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        for (name, outcome) in names.into_iter().zip(outcomes) {
+            if let Some(Err(error)) = outcome {
                 report.failed += 1;
-                report.failures.push((name.clone(), error));
+                report.failures.push((name.to_owned(), error));
             }
         }
         report
