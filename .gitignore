@@ -1,1 +1,8 @@
-/target
+# Cargo build output
+/target/
+**/*.rs.bk
+
+# Local secrets
+.env
+.env.*
+!.env.example
