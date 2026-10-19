@@ -1,6 +1,6 @@
 [package]
 name = "rustclamp-scheduler"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.96.1"
 description = "Contribution target for bounded, clock-driven application jobs."
@@ -19,7 +19,7 @@ tokio = ["dep:tokio"]
 
 [dependencies]
 tokio = { version = "1.53.1", optional = true, default-features = false, features = ["rt", "time", "macros"] }
-rustclamp-core = { version = "0.1.0", path = "../core" }
+rustclamp-core = { version = "1.0.0", path = "../core" }
 
 [lints.rust]
 unsafe_code = "forbid"
