@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Ready for crates.io: `publish = false` is gone and the manifest carries
+  homepage, documentation, keywords and categories. Nothing is uploaded until
+  rustclamp's `tools/publish.py --execute` runs.
+
 - Fix drift: after a late tick the next run is the next slot on the original
   grid (`first + k * interval`), not `now + interval` (#3).
 - Add `Scheduler::run_now(name) -> RunNow`, for admin actions and tests;
