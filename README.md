@@ -10,11 +10,11 @@ time by hand.
 
 ## Install
 
-Not yet published to crates.io; depend on it from git (Rust 1.96.1+, edition 2024):
+Rust 1.96.1+, edition 2024:
 
 ```toml
 [dependencies]
-rustclamp-scheduler = { git = "https://github.com/rustclamp/scheduler", features = ["tokio"] }
+rustclamp-scheduler = { version = "1", features = ["tokio"] }
 ```
 
 ## Example
