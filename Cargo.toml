@@ -6,8 +6,11 @@ rust-version = "1.96.1"
 description = "Contribution target for bounded, clock-driven application jobs."
 repository = "https://github.com/rustclamp/scheduler"
 license = "MIT OR Apache-2.0"
+homepage = "https://rustclamp.com"
+documentation = "https://docs.rs/rustclamp-scheduler"
+keywords = ["framework", "scheduler", "cron", "jobs"]
+categories = ["date-and-time", "asynchronous"]
 readme = "README.md"
-publish = false
 
 [features]
 default = []
