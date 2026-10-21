@@ -44,7 +44,16 @@ let scheduler = SchedulerTarget.build(&[(
 - `Scheduler::stop_admission()` closes the gate before shutdown owners await active ticks. No queued job buffer exists.
 - `SchedulerJobs`: ready-made qualifier for the job target.
 
-The overlap lock is process-local; multiple scheduler processes need an explicit distributed lock.
+- `Scheduler::leader_only(lock)` runs jobs only while a `LeaderLock` says this instance leads (see below).
+
+The overlap lock is process-local. With several replicas, use `leader_only` so each job runs once:
+`LeaderLock::hold` is asked once per tick that has a due job; a standby skips (counted in
+`TickReport::not_leader`, its schedule still advances) and takes over on its next due tick after
+the leader loses the lock. `rustclamp-postgres` implements it with an advisory lock (feature `scheduler`):
+
+```rust
+let scheduler = scheduler.leader_only(db.leader_lock("app.scheduler"));
+```
 
 ## Features
 

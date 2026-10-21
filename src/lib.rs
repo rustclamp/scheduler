@@ -31,6 +31,18 @@ pub type JobError = Box<dyn Error + Send + Sync>;
 
 type Handler = Arc<dyn Fn() -> JobFuture + Send + Sync + 'static>;
 
+/// A boxed future returned by [`LeaderLock::hold`].
+pub type LeaderFuture<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+/// A lock that at most one scheduler instance holds at a time, such as a
+/// database advisory lock. See [`Scheduler::leader_only`].
+pub trait LeaderLock: Send + Sync {
+    /// Takes the lock if it is free, or checks that this instance still holds
+    /// it. Resolves to `true` while this instance is the leader. Errors (a
+    /// lost connection, an unreachable server) resolve to `false`.
+    fn hold(&self) -> LeaderFuture<'_>;
+}
+
 /// How the scheduler treats multiple missed intervals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MisfirePolicy {
@@ -143,6 +155,7 @@ impl ContributionTarget for SchedulerTarget {
         Ok(Scheduler {
             jobs,
             accepting: Mutex::new(true),
+            leader: None,
         })
     }
 }
@@ -160,9 +173,25 @@ struct Job {
 pub struct Scheduler {
     jobs: BTreeMap<String, Job>,
     accepting: Mutex<bool>,
+    leader: Option<Box<dyn LeaderLock>>,
 }
 
 impl Scheduler {
+    /// Runs this scheduler's jobs only while `lock` says this instance is the
+    /// leader, so N replicas run each job once.
+    ///
+    /// Each tick with a due job asks [`LeaderLock::hold`] once, so a standby
+    /// retries on every due tick and a leader that lost its lock starts no new
+    /// job until it holds it again. A standby still moves each due job to its
+    /// next slot and counts it in [`TickReport::not_leader`], so taking over
+    /// does not replay a backlog. Jobs already running are not cancelled.
+    /// [`Scheduler::run_now`] ignores the lock.
+    #[must_use]
+    pub fn leader_only(mut self, lock: impl LeaderLock + 'static) -> Self {
+        self.leader = Some(Box::new(lock));
+        self
+    }
+
     /// Stops admitting new job invocations; already admitted handlers are allowed to finish.
     ///
     /// The application owns each tick future and must await its completion to drain work.
@@ -244,17 +273,24 @@ impl Scheduler {
     pub async fn tick(&self, clock: &dyn Clock) -> TickReport {
         let now = clock.now();
         let mut report = TickReport::default();
-        let mut names = Vec::new();
-        let mut running: Vec<(JobFuture, RunningGuard<'_>)> = Vec::new();
+        let mut due = Vec::new();
         for (name, job) in &self.jobs {
             match is_due(job, now) {
-                Due::No => continue,
-                Due::SkippedMisfire => {
-                    report.misfires_skipped += 1;
-                    continue;
-                }
-                Due::Yes => {}
+                Due::No => {}
+                Due::SkippedMisfire => report.misfires_skipped += 1,
+                Due::Yes => due.push((name, job)),
             }
+        }
+        if let Some(lock) = &self.leader
+            && !due.is_empty()
+            && !lock.hold().await
+        {
+            report.not_leader = due.len();
+            return report;
+        }
+        let mut names = Vec::new();
+        let mut running: Vec<(JobFuture, RunningGuard<'_>)> = Vec::new();
+        for (name, job) in due {
             match try_start_job(&self.accepting, &job.running) {
                 StartJob::Started => {}
                 StartJob::AlreadyRunning => {
@@ -403,6 +439,9 @@ pub struct TickReport {
     pub misfires_skipped: usize,
     /// Jobs skipped because the same job was already running.
     pub overlaps_skipped: usize,
+    /// Due jobs skipped because this instance is not the leader
+    /// ([`Scheduler::leader_only`]).
+    pub not_leader: usize,
     /// Invoked jobs that returned an error.
     pub failed: usize,
     /// The name and error of each job that failed, in job-name order.
