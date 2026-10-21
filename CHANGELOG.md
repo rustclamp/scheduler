@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add `LeaderLock` and `Scheduler::leader_only(lock)`: with several replicas,
+  jobs run only on the instance holding the lock; a standby takes over on its
+  next due tick (#11).
+- Breaking for struct literals and exhaustive patterns: `TickReport` gains
+  `not_leader`, the due jobs a standby skipped (#11).
+
 ## 1.0.0 - 2026-10-19
 
 ### Changed
