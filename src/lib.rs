@@ -432,6 +432,7 @@ impl Drop for RunningGuard<'_> {
 
 /// Summary of one scheduler tick.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct TickReport {
     /// Jobs invoked during this tick.
     pub invoked: usize,

@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 - 2026-10-21
+
+- Breaking: `TickReport` gains `not_leader` and is now `#[non_exhaustive]`, so
+  later fields are not breaking. Read its fields; build one with
+  `TickReport::default()` if needed.
 
 - Add `LeaderLock` and `Scheduler::leader_only(lock)`: with several replicas,
   jobs run only on the instance holding the lock; a standby takes over on its
